@@ -1,0 +1,710 @@
+- name: Deploy WordPress 6.8.2 with PHP 8.3, local MariaDB, HTTPS, and migration user on Ubuntu 24.04
+  hosts: aws_ec2
+  become: yes
+  remote_user: ubuntu
+  gather_facts: true
+
+  vars:
+    ansible_ssh_private_key_file: "/etc/ansible/keys/external-servers.pem" # Put your private ssh key
+    ansible_ssh_user: "ubuntu"
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o IdentitiesOnly=yes'
+    ansible_host_key_checking: false
+
+    # New: domain variable used across paths and vhosts
+    new_hostname: "ec2-wordpress-demo" # Modify as you wish
+    domain: "example" # Modify as you wish
+
+    wp_version: "6.8.2"
+    php_version: "8.3"
+    wp_install_dir: "/var/www/html/{{ domain }}"
+
+    db_name: "exampledb" # Modify as you wish
+    db_user: "exampleconnect" # Modify as you wish
+    db_password: "{{ lookup('env', 'DB_PASSWORD') | default('Mmv3Gl79@PaKlos1', true) }}" # Modify as you wish
+    db_host: "127.0.0.1"
+    mysql_socket: "/var/run/mysqld/mysqld.sock"
+
+    domain_name: "{{ lookup('env', 'DOMAIN_NAME') | default('example.com', true) }}" # Modify as you wish
+    letsencrypt_email: "{{ lookup('env', 'LETSENCRYPT_EMAIL') | default('admin@example.com', true) }}"
+    enable_https: true
+    # Pre-cutover: keep true. Set to false at cutover.
+    use_self_signed_ssl: true
+    enable_letsencrypt: "{{ enable_https and (not use_self_signed_ssl) | bool }}"
+
+    content_user: "{{ lookup('env', 'CONTENT_USER') | default('webdev', true) }}" # Put userlogin for web dev
+    content_user_password: "{{ lookup('env', 'CONTENT_USER_PASSWORD') | default('', true) }}"
+    content_user_ssh_key: "{{ lookup('env', 'CONTENT_USER_SSH_KEY') | default('ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAACAQCef+V8THaAiMhfVhA7jB9GyK+wOnmTu2liak5JL/VtgFSFeq3lXImSdbvCj0RPk3A9ML5nx6hCRKY6f8BeFbGPY9wloIE4WeiLH/mX1IknDi6JTvH5oK+qhDTIRn7CfP+dXH0Wbot8/4OkLEChL7rVAFDyyik7zXy1NxwJIytMkGjWeHhBkv0SuyopQrb/IPbAan03ZINxnyyJ9rsFuzhaRBujSUL0frwJhk7JMoEij9beBd/8e+L9yz348B8r6frrvc4I0/Dfr7TmVzWshi6NHxN+z5TJDGEBh0/2ZpPMNyWUYXN/wVxbBKdoyMIiubjaGnpZ1YAvKoyWNk6R1fCZ9HCxaCrxNQlLQzPJx8tksq6isNBrgd6cBDH8dAent4tHV6hiB7irr/RwYhgtbK+V8g6HIlWiod7hCPCOL7mUj0fk7Tg4206w9QeY8gs4rd6E2Cjo5eFyun/cpMnJMX/73dfnmV6P46pFh+AccM+H1oIkO7N828e/p8OD+8RvZcCPzEcAwNqt0yKe6Mevf0fFRS+stPyBzAaR3OXermiFP+8KIMia61V5aCzBQhjvHhXn4sHql/Fl6uODUzD3ZKgrbLUBf12s/XKEOEj5gsC/IqGGjvIA/V+Wgwg5wkypTu9w2/IXS7qiaNn7k4bQ+h7LOBCJQaPr3FrzMcEBCw8Jzw== savageadfox@hostname
+', true) }}" # Put your public ssh key
+    allow_password_auth: false
+
+  pre_tasks:
+    - name: Verify Ubuntu 24.04
+      assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_version == "24.04"
+        fail_msg: "This playbook requires Ubuntu 24.04 (Noble)."
+        success_msg: "Ubuntu 24.04 detected."
+        
+    - name: Set hostname
+      hostname:
+        name: "{{ new_hostname }}"
+    
+    - name: Update /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1'
+        line: "127.0.1.1 {{ new_hostname }}"
+        state: present
+        
+    - name: Ensure hostname persists after reboot
+      copy:
+        content: "{{ new_hostname }}"
+        dest: /etc/hostname    
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+  tasks:
+    - name: Install Apache, PHP 8.3 and extensions
+      apt:
+        name:
+          - apache2
+          - apache2-utils
+          - php8.3
+          - libapache2-mod-php8.3
+          - php8.3-cli
+          - php8.3-common
+          - php8.3-mysql
+          - php8.3-curl
+          - php8.3-gd
+          - php8.3-mbstring
+          - php8.3-xml
+          - php8.3-soap
+          - php8.3-intl
+          - php8.3-zip
+          - php8.3-bcmath
+          - unzip
+          - wget
+          - curl
+          - rsync
+          - acl
+        state: present
+
+    - name: Configure PHP 8.3 for WordPress (apache2 SAPI)
+      lineinfile:
+        path: "/etc/php/{{ php_version }}/apache2/php.ini"
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        backup: yes
+      loop:
+        - { regexp: '^upload_max_filesize', line: 'upload_max_filesize = 64M' }
+        - { regexp: '^post_max_size', line: 'post_max_size = 64M' }
+        - { regexp: '^memory_limit', line: 'memory_limit = 256M' }
+        - { regexp: '^max_execution_time', line: 'max_execution_time = 300' }
+        - { regexp: '^max_input_time', line: 'max_input_time = 300' }
+        - { regexp: '^max_input_vars', line: 'max_input_vars = 3000' }
+      notify: restart apache
+
+    - name: Enable Apache modules (rewrite, headers, ssl)
+      apache2_module:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - rewrite
+        - headers
+        - ssl
+      notify: restart apache
+
+    - name: Install MariaDB server, client, and PyMySQL
+      apt:
+        name:
+          - mariadb-server
+          - mariadb-client
+          - python3-pymysql
+        state: present
+
+    - name: Ensure MariaDB is started and enabled
+      service:
+        name: mariadb
+        state: started
+        enabled: yes
+
+    - name: Wait for MySQL socket to be ready
+      wait_for:
+        path: "{{ mysql_socket }}"
+        state: present
+        timeout: 60
+
+    - name: Create WordPress database (utf8mb4)
+      community.mysql.mysql_db:
+        name: "{{ db_name }}"
+        state: present
+        encoding: "utf8mb4"
+        collation: "utf8mb4_unicode_ci"
+        login_unix_socket: "{{ mysql_socket }}"
+
+    - name: Create WordPress DB user for localhost (socket)
+      community.mysql.mysql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        host: "localhost"
+        priv: "{{ db_name }}.*:ALL"
+        state: present
+        login_unix_socket: "{{ mysql_socket }}"
+
+    - name: Create WordPress DB user for 127.0.0.1 (TCP)
+      community.mysql.mysql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        host: "127.0.0.1"
+        priv: "{{ db_name }}.*:ALL"
+        state: present
+        login_unix_socket: "{{ mysql_socket }}"
+
+    - name: Create content provider user for migration
+      user:
+        name: "{{ content_user }}"
+        comment: "Content Provider - Website Migration User"
+        shell: /bin/bash
+        create_home: yes
+        home: "/home/{{ content_user }}"
+        state: present
+
+    - name: Set password for content user (if provided)
+      user:
+        name: "{{ content_user }}"
+        password: "{{ content_user_password | password_hash('sha512') }}"
+        update_password: always
+      when: content_user_password != ''
+      no_log: true
+
+    - name: Add content user to sudo group
+      user:
+        name: "{{ content_user }}"
+        groups: sudo
+        append: yes
+
+    - name: Configure passwordless sudo for content user
+      lineinfile:
+        path: "/etc/sudoers.d/{{ content_user }}"
+        line: "{{ content_user }} ALL=(ALL) NOPASSWD:ALL"
+        create: yes
+        mode: "0440"
+        validate: "visudo -cf %s"
+
+    - name: Create .ssh directory for content user
+      file:
+        path: "/home/{{ content_user }}/.ssh"
+        state: directory
+        owner: "{{ content_user }}"
+        group: "{{ content_user }}"
+        mode: "0700"
+
+    - name: Add SSH public key for content user (if provided)
+      authorized_key:
+        user: "{{ content_user }}"
+        key: "{{ content_user_ssh_key }}"
+        state: present
+      when: content_user_ssh_key != ''
+
+    - name: Add content user to www-data group (WordPress file access)
+      user:
+        name: "{{ content_user }}"
+        groups: www-data
+        append: yes
+
+    - name: Enable password authentication in SSH config (if configured)
+      lineinfile:
+        path: "/etc/ssh/sshd_config"
+        regexp: "^#?PasswordAuthentication"
+        line: "PasswordAuthentication yes"
+        backup: yes
+      notify: restart sshd
+      when: allow_password_auth
+
+    - name: Download WordPress "{{ wp_version }}"
+      get_url:
+        url: "https://wordpress.org/wordpress-{{ wp_version }}.tar.gz"
+        dest: "/tmp/wordpress-{{ wp_version }}.tar.gz"
+        mode: "0644"
+        timeout: 300
+
+    - name: Extract WordPress
+      unarchive:
+        src: "/tmp/wordpress-{{ wp_version }}.tar.gz"
+        dest: "/tmp/"
+        remote_src: yes
+        creates: "/tmp/wordpress"
+
+    - name: Ensure web root exists
+      file:
+        path: "{{ wp_install_dir }}"
+        state: directory
+        owner: "www-data"
+        group: "www-data"
+        mode: "0755"
+
+    - name: Copy WordPress files to web root
+      command: "rsync -a --delete /tmp/wordpress/ {{ wp_install_dir }}/"
+      args:
+        creates: "{{ wp_install_dir }}/wp-settings.php"
+
+    - name: Check if wp-config.php exists
+      stat:
+        path: "{{ wp_install_dir }}/wp-config.php"
+      register: wp_config_stat
+
+    - name: Create wp-config.php from sample if not present
+      copy:
+        src: "{{ wp_install_dir }}/wp-config-sample.php"
+        dest: "{{ wp_install_dir }}/wp-config.php"
+        remote_src: yes
+        owner: "www-data"
+        group: "www-data"
+        mode: "0640"
+      when: not wp_config_stat.stat.exists
+
+    - name: Ensure DB settings in wp-config.php (idempotent)
+      replace:
+        path: "{{ wp_install_dir }}/wp-config.php"
+        regexp: "{{ item.regexp }}"
+        replace: "{{ item.replace }}"
+      loop:
+        - { regexp: "define\\(\\s*'DB_NAME'\\s*,\\s*'[^']+'\\s*\\);",     replace: "define('DB_NAME', '{{ db_name }}');" }
+        - { regexp: "define\\(\\s*'DB_USER'\\s*,\\s*'[^']+'\\s*\\);",     replace: "define('DB_USER', '{{ db_user }}');" }
+        - { regexp: "define\\(\\s*'DB_PASSWORD'\\s*,\\s*'[^']+'\\s*\\);", replace: "define('DB_PASSWORD', '{{ db_password }}');" }
+        - { regexp: "define\\(\\s*'DB_HOST'\\s*,\\s*'[^']+'\\s*\\);",     replace: "define('DB_HOST', '{{ db_host }}');" }
+
+    - name: Generate and inject WordPress salt keys (once)
+      uri:
+        url: "https://api.wordpress.org/secret-key/1.1/salt/"
+        return_content: yes
+      register: wp_salt_keys
+
+    - name: Add/refresh salt keys block
+      blockinfile:
+        path: "{{ wp_install_dir }}/wp-config.php"
+        marker: "/* {mark} ANSIBLE MANAGED SALT KEYS */"
+        block: "{{ wp_salt_keys.content }}"
+        insertafter: "Authentication Unique Keys and Salts"
+      when: wp_salt_keys is defined and wp_salt_keys.content is defined
+
+    - name: Set ownership and permissions for WordPress
+      file:
+        path: "{{ wp_install_dir }}"
+        owner: "www-data"
+        group: "www-data"
+        recurse: yes
+        state: directory
+
+    - name: Create uploads directory with proper perms
+      file:
+        path: "{{ wp_install_dir }}/wp-content/uploads"
+        state: directory
+        owner: "www-data"
+        group: "www-data"
+        mode: "0755"
+
+    - name: Harden wp-config.php
+      file:
+        path: "{{ wp_install_dir }}/wp-config.php"
+        owner: "www-data"
+        group: "www-data"
+        mode: "0640"
+
+    # -------- Discover public IP (IMDSv2-safe) --------
+    - name: Try to use Ansible EC2 fact if available
+      set_fact:
+        public_ip: "{{ ansible_ec2_public_ipv4 | default('', true) }}"
+      when: public_ip is not defined
+
+    - name: Get IMDSv2 token (AWS EC2 metadata)
+      uri:
+        url: "http://169.254.169.254/latest/api/token"
+        method: PUT
+        headers:
+          X-aws-ec2-metadata-token-ttl-seconds: "21600"
+        return_content: yes
+        timeout: 2
+        status_code: 200
+      register: imds_token
+      failed_when: false
+      changed_when: false
+      when: public_ip | default('') == ''
+
+    - name: Get public IP via IMDSv2
+      uri:
+        url: "http://169.254.169.254/latest/meta-data/public-ipv4"
+        method: GET
+        headers:
+          X-aws-ec2-metadata-token: "{{ imds_token.content | default('') }}"
+        return_content: yes
+        timeout: 2
+      register: public_ip_result
+      failed_when: false
+      changed_when: false
+      when: public_ip | default('') == ''
+
+    - name: Set public_ip fact from IMDSv2 result
+      set_fact:
+        public_ip: "{{ public_ip_result.content | default('', true) }}"
+      when: public_ip | default('') == '' and (public_ip_result is defined)
+
+    # -------- Optional: Allow access via public IP pre-cutover --------
+    - name: Add temporary WP_HOME and WP_SITEURL overrides for public IP
+      blockinfile:
+        path: "{{ wp_install_dir }}/wp-config.php"
+        marker: "/* {mark} ANSIBLE MANAGED IP ACCESS */"
+        insertbefore: "/* That's all, stop editing!"
+        block: |
+          // Temporary: Allow access via public IP for pre-cutover testing
+          // Remove or comment out after DNS cutover
+          if (!defined('WP_HOME')) {
+              define('WP_HOME', '{{ "https" if enable_https else "http" }}://{{ public_ip }}');
+          }
+          if (!defined('WP_SITEURL')) {
+              define('WP_SITEURL', '{{ "https" if enable_https else "http" }}://{{ public_ip }}');
+          }
+      when: public_ip is defined and public_ip != ''
+
+    # -------- Apache vhosts --------
+    - name: Configure Apache virtual host for WordPress (HTTP :80)
+      copy:
+        dest: "/etc/apache2/sites-available/{{ domain }}.conf"
+        mode: "0644"
+        content: |
+          <VirtualHost *:80>
+              ServerName {{ domain_name }}
+              {% if public_ip is defined and public_ip|length > 0 %}
+              ServerAlias {{ public_ip }}
+              {% endif %}
+              ServerAdmin webmaster@localhost
+              DocumentRoot {{ wp_install_dir }}
+
+              Alias /.well-known/acme-challenge/ {{ wp_install_dir }}/.well-known/acme-challenge/
+              <Directory "{{ wp_install_dir }}/.well-known/acme-challenge/">
+                  Options None
+                  AllowOverride None
+                  Require all granted
+              </Directory>
+
+              <Directory {{ wp_install_dir }}>
+                  Options FollowSymLinks
+                  AllowOverride All
+                  Require all granted
+                  <IfModule mod_rewrite.c>
+                      RewriteEngine On
+                      RewriteBase /
+                      RewriteRule ^index\.php$ - [L]
+                      RewriteCond %{REQUEST_FILENAME} !-f
+                      RewriteCond %{REQUEST_FILENAME} !-d
+                      RewriteRule . /index.php [L]
+                  </IfModule>
+              </Directory>
+
+              <Directory {{ wp_install_dir }}/wp-content/uploads>
+                  Options -Indexes
+              </Directory>
+
+              ErrorLog ${APACHE_LOG_DIR}/{{ domain }}_error.log
+              CustomLog ${APACHE_LOG_DIR}/{{ domain }}_access.log combined
+          </VirtualHost>
+      notify: restart apache
+
+    - name: Enable WordPress site (:80)
+      command: "a2ensite {{ domain }}.conf"
+      args:
+        creates: "/etc/apache2/sites-enabled/{{ domain }}.conf"
+      notify: restart apache
+
+    - name: Ensure Apache is started
+      service:
+        name: apache2
+        state: started
+        enabled: yes
+
+    # -------- Temporary self-signed SSL (pre-cutover) --------
+    - name: Create directories for temporary self-signed cert
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "/etc/ssl/private"
+        - "/etc/ssl/certs"
+      when: enable_https and use_self_signed_ssl
+
+    - name: Create temporary self-signed cert (7 days)
+      command: >
+        openssl req -x509 -nodes -newkey rsa:2048
+        -keyout /etc/ssl/private/{{ domain }}-temp.key
+        -out /etc/ssl/certs/{{ domain }}-temp.crt
+        -days 7
+        -subj "/CN={{ domain_name }}"
+      args:
+        creates: "/etc/ssl/certs/{{ domain }}-temp.crt"
+      when: enable_https and use_self_signed_ssl
+
+    - name: Restrict private key permissions
+      file:
+        path: "/etc/ssl/private/{{ domain }}-temp.key"
+        owner: root
+        group: root
+        mode: "0600"
+      when: enable_https and use_self_signed_ssl
+
+    - name: Create Apache SSL vhost with temporary self-signed cert (:443)
+      copy:
+        dest: "/etc/apache2/sites-available/{{ domain }}-temp-ssl.conf"
+        mode: "0644"
+        content: |
+          <IfModule mod_ssl.c>
+          <VirtualHost *:443>
+              ServerName {{ domain_name }}
+              {% if public_ip is defined and public_ip|length > 0 %}
+              ServerAlias {{ public_ip }}
+              {% endif %}
+              ServerAdmin webmaster@localhost
+              DocumentRoot {{ wp_install_dir }}
+
+              <Directory {{ wp_install_dir }}>
+                  Options FollowSymLinks
+                  AllowOverride All
+                  Require all granted
+              </Directory>
+
+              ErrorLog ${APACHE_LOG_DIR}/{{ domain }}_ssl_error.log
+              CustomLog ${APACHE_LOG_DIR}/{{ domain }}_ssl_access.log combined
+
+              SSLEngine on
+              SSLCertificateFile /etc/ssl/certs/{{ domain }}-temp.crt
+              SSLCertificateKeyFile /etc/ssl/private/{{ domain }}-temp.key
+
+              Header always set Strict-Transport-Security "max-age=0"
+              Header always set X-Content-Type-Options "nosniff"
+              Header always set X-Frame-Options "SAMEORIGIN"
+              Header always set X-XSS-Protection "1; mode=block"
+              Header always set Referrer-Policy "strict-origin-when-cross-origin"
+          </VirtualHost>
+          </IfModule>
+      when: enable_https and use_self_signed_ssl
+      notify: restart apache
+
+    - name: Enable temp SSL vhost (:443)
+      command: "a2ensite {{ domain }}-temp-ssl.conf"
+      when: enable_https and use_self_signed_ssl
+      notify: restart apache
+
+    # -------- Let's Encrypt (webroot) - guarded for cutover --------
+    - name: Ensure ACME challenge directory exists
+      file:
+        path: "{{ wp_install_dir }}/.well-known/acme-challenge"
+        state: directory
+        owner: "www-data"
+        group: "www-data"
+        mode: "0755"
+        recurse: yes
+      when: enable_letsencrypt
+
+    - name: Install Certbot
+      apt:
+        name:
+          - certbot
+        state: present
+      when: enable_letsencrypt
+
+    - name: Check if SSL certificate already exists
+      stat:
+        path: "/etc/letsencrypt/live/{{ domain_name }}/fullchain.pem"
+      register: cert_exists
+      when: enable_letsencrypt
+
+    - name: Validate domain and email vars for LE
+      assert:
+        that:
+          - domain_name != "example.com"
+          - letsencrypt_email != "admin@example.com"
+        fail_msg: "Set DOMAIN_NAME and LETSENCRYPT_EMAIL for Let's Encrypt issuance."
+      when: enable_letsencrypt
+
+    - name: "Preflight: local challenge test"
+      copy:
+        dest: "{{ wp_install_dir }}/.well-known/acme-challenge/test"
+        content: "ok"
+        owner: "www-data"
+        group: "www-data"
+        mode: "0644"
+      when: enable_letsencrypt
+
+    - name: Verify challenge reachable from server locally
+      command: "curl -sSf http://localhost/.well-known/acme-challenge/test"
+      register: acme_local_test
+      changed_when: false
+      when: enable_letsencrypt
+
+    - name: Abort if local challenge test failed
+      fail:
+        msg: "Apache is not serving .well-known/acme-challenge from {{ wp_install_dir }}. Fix vhost before requesting a certificate."
+      when: enable_letsencrypt and (acme_local_test.rc != 0 or acme_local_test.stdout.strip() != "ok")
+
+    - name: Obtain Let's Encrypt certificate using webroot
+      command: >
+        certbot certonly
+        --webroot
+        --webroot-path {{ wp_install_dir }}
+        --non-interactive
+        --agree-tos
+        --email {{ letsencrypt_email }}
+        -d {{ domain_name }}
+      when: enable_letsencrypt and not cert_exists.stat.exists
+      register: certbot_webroot_result
+
+    - name: Display Certbot webroot result
+      debug:
+        var: certbot_webroot_result.stdout_lines
+      when: enable_letsencrypt and certbot_webroot_result is defined
+
+    - name: Create Apache SSL vhost using Let's Encrypt cert (:443)
+      copy:
+        dest: "/etc/apache2/sites-available/{{ domain }}-ssl.conf"
+        mode: "0644"
+        content: |
+          <IfModule mod_ssl.c>
+          <VirtualHost *:443>
+              ServerName {{ domain_name }}
+              {% if public_ip is defined and public_ip|length > 0 %}
+              ServerAlias {{ public_ip }}
+              {% endif %}
+              ServerAdmin {{ letsencrypt_email }}
+              DocumentRoot {{ wp_install_dir }}
+
+              <Directory {{ wp_install_dir }}>
+                  Options FollowSymLinks
+                  AllowOverride All
+                  Require all granted
+              </Directory>
+
+              ErrorLog ${APACHE_LOG_DIR}/{{ domain }}_ssl_error.log
+              CustomLog ${APACHE_LOG_DIR}/{{ domain }}_ssl_access.log combined
+
+              SSLEngine on
+              SSLCertificateFile /etc/letsencrypt/live/{{ domain_name }}/fullchain.pem
+              SSLCertificateKeyFile /etc/letsencrypt/live/{{ domain_name }}/privkey.pem
+
+              Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+              Header always set X-Content-Type-Options "nosniff"
+              Header always set X-Frame-Options "SAMEORIGIN"
+              Header always set X-XSS-Protection "1; mode=block"
+              Header always set Referrer-Policy "strict-origin-when-cross-origin"
+          </VirtualHost>
+          </IfModule>
+      when: enable_letsencrypt
+      notify: restart apache
+
+    - name: Enable LE SSL vhost and required modules
+      shell: |
+        a2ensite {{ domain }}-ssl.conf
+        a2enmod rewrite headers ssl
+      args:
+        executable: /bin/bash
+      when: enable_letsencrypt
+      notify: restart apache
+
+    - name: Enable Certbot auto-renewal timer
+      systemd:
+        name: certbot.timer
+        enabled: yes
+        state: started
+      when: enable_letsencrypt
+
+    - name: Add HTTP->HTTPS redirect to :80 vhost
+      blockinfile:
+        path: "/etc/apache2/sites-available/{{ domain }}.conf"
+        marker: "# {mark} ANSIBLE MANAGED REDIRECT"
+        insertbefore: "</VirtualHost>"
+        block: |
+          RewriteEngine On
+          RewriteCond %{HTTPS} !=on
+          RewriteRule ^/?(.*)$ https://{{ domain_name }}/$1 [R=301,L]
+      when: enable_letsencrypt
+      notify: restart apache
+
+    # -------- Post-cutover cleanup of IP override --------
+    - name: Remove public IP override from wp-config.php (post-cutover)
+      blockinfile:
+        path: "{{ wp_install_dir }}/wp-config.php"
+        marker: "/* {mark} ANSIBLE MANAGED IP ACCESS */"
+        state: absent
+      when:
+        - enable_letsencrypt
+        - not use_self_signed_ssl
+
+    # -------- Health and info --------
+    - name: Check local MariaDB is reachable
+      shell: "mysqladmin --socket={{ mysql_socket }} ping"
+      register: db_ping
+      changed_when: false
+      failed_when: db_ping.rc != 0
+
+    - name: Get PHP version
+      shell: "php -r 'echo PHP_MAJOR_VERSION.\".\".PHP_MINOR_VERSION.\".\".PHP_RELEASE_VERSION;'"
+      register: php_ver_cmd
+      changed_when: false
+
+    - name: Determine site IP (prefer default IPv4)
+      set_fact:
+        site_ip: "{{ ansible_default_ipv4.address }}"
+
+    - name: Display WordPress installation info
+      debug:
+        msg:
+          - "=========================================="
+          - "WordPress {{ wp_version }} installation completed!"
+          - "System:"
+          - "  PHP Version: {{ php_ver_cmd.stdout | default(php_version, true) }}"
+          - "  Ubuntu Version: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "  Install dir: {{ wp_install_dir }}"
+          - "  Server IP: {{ site_ip }}"
+          - "  Public IP: {{ public_ip | default('N/A', true) }}"
+          - "Database:"
+          - "  Status: {{ 'Connected ✓' if db_ping.rc == 0 else 'UNREACHABLE ✗' }}"
+          - "  Name: {{ db_name }}"
+          - "  Host: {{ db_host }}"
+          - "HTTPS:"
+          - "  Mode: {{ 'Self-signed (temporary)' if use_self_signed_ssl else (enable_letsencrypt | ternary(\"Let's Encrypt (public CA)\", \"Disabled\")) }}"
+          - "  Test HTTPS (warning expected if self-signed): https://{{ site_ip }}/"
+          - "  HTTP: http://{{ site_ip }}/"
+          - "Public IP access (pre-cutover):"
+          - "  {{ 'https' if enable_https else 'http' }}://{{ public_ip }}/wp-admin (if public IP is set)"
+          - "Migration user:"
+          - "  Username: {{ content_user }} (sudo, www-data)"
+          - "=========================================="
+
+    - name: Cleanup temporary WordPress files
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "/tmp/wordpress-{{ wp_version }}.tar.gz"
+        - "/tmp/wordpress"
+
+  handlers:
+    - name: restart apache
+      service:
+        name: apache2
+        state: restarted
+
+    - name: restart sshd
+      service:
+        name: sshd
+        state: restarted
+
+
+
+
+
