@@ -20,7 +20,7 @@ data "aws_security_group" "web_sg" {
 }
 resource "aws_instance" "web" {
   ami = "ami-0933f1385008d33c4"  # Ubuntu 24.04 AMI
-  instance_type = "t3.xlarge" # Modify as you wish
+  instance_type = "m5.large" # Modify as you wish
   subnet_id = data.aws_subnet.target.id
   vpc_security_group_ids = [data.aws_security_group.web_sg.id]
   associate_public_ip_address = true
