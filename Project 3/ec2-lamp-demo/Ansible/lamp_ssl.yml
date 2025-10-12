@@ -5,7 +5,6 @@
   gather_facts: true
 
   vars:
-    # SSH settings for EC2 (override with inventory/ansible.cfg if preferred)
     ansible_ssh_private_key_file: "/etc/ansible/keys/external-servers.pem"
     ansible_ssh_user: "ubuntu"
     ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o IdentitiesOnly=yes'
@@ -29,7 +28,8 @@
     domain_name: "{{ lookup('env', 'DOMAIN_NAME') | default('', true) }}"   # leave empty to serve by IP first
     letsencrypt_email: "{{ lookup('env', 'LETSENCRYPT_EMAIL') | default('admin@example.com', true) }}"
     enable_https: true
-    use_self_signed_ssl: true                         # pre-cutover: self-signed against IP or domain
+    # pre-cutover: self-signed against IP or domain
+    use_self_signed_ssl: true
     enable_letsencrypt: "{{ enable_https and (not use_self_signed_ssl) | bool }}"
 
   pre_tasks:
@@ -397,4 +397,5 @@
     - name: restart apache
       service:
         name: apache2
+
         state: restarted
