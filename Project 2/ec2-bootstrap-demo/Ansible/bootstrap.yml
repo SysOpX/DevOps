@@ -10,7 +10,7 @@
     ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o IdentitiesOnly=yes'
     ansible_host_key_checking: false
 
-    new_hostname: "ubuntu-server-01"
+    new_hostname: "ec2-bootstrap-demo"
 
   tasks:
     - name: Update apt cache
