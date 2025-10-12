@@ -1,0 +1,400 @@
+- name: Deploy LAMP (Apache + PHP 8.3 + MariaDB) with HTTPS on Ubuntu 24.04
+  hosts: aws_ec2
+  become: yes
+  remote_user: ubuntu
+  gather_facts: true
+
+  vars:
+    # SSH settings for EC2 (override with inventory/ansible.cfg if preferred)
+    ansible_ssh_private_key_file: "/etc/ansible/keys/external-servers.pem"
+    ansible_ssh_user: "ubuntu"
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o IdentitiesOnly=yes'
+    ansible_host_key_checking: false
+
+    # Hostname and site basics
+    new_hostname: "ec2-lamp-demo"
+    site_name: "example"                        # used for filenames
+    php_version: "8.3"
+    web_root: "/var/www/html/{{ site_name }}"
+
+    # MariaDB settings
+    db_root_password: "{{ lookup('env', 'DB_ROOT_PASSWORD') | default('ChangeMe_Root!', true) }}"
+    create_app_db: true
+    app_db_name: "appdb"
+    app_db_user: "appconnect"
+    app_db_password: "{{ lookup('env', 'APP_DB_PASSWORD') | default('ChangeMe_App!', true) }}"
+    mysql_socket: "/var/run/mysqld/mysqld.sock"
+
+    # HTTPS and cutover strategy
+    domain_name: "{{ lookup('env', 'DOMAIN_NAME') | default('', true) }}"   # leave empty to serve by IP first
+    letsencrypt_email: "{{ lookup('env', 'LETSENCRYPT_EMAIL') | default('admin@example.com', true) }}"
+    enable_https: true
+    use_self_signed_ssl: true                         # pre-cutover: self-signed against IP or domain
+    enable_letsencrypt: "{{ enable_https and (not use_self_signed_ssl) | bool }}"
+
+  pre_tasks:
+    - name: Verify Ubuntu 24.04
+      assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_version == "24.04"
+        fail_msg: "This playbook requires Ubuntu 24.04 (Noble)."
+        success_msg: "Ubuntu 24.04 detected."
+
+    - name: Set hostname
+      hostname:
+        name: "{{ new_hostname }}"
+
+    - name: Ensure /etc/hosts maps hostname
+      lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1'
+        line: "127.0.1.1 {{ new_hostname }}"
+        state: present
+
+    - name: Persist hostname
+      copy:
+        content: "{{ new_hostname }}"
+        dest: /etc/hostname
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 1800
+
+  tasks:
+    - name: Install Apache, PHP 8.3, and common extensions
+      apt:
+        name:
+          - apache2
+          - apache2-utils
+          - php8.3
+          - libapache2-mod-php8.3
+          - php8.3-cli
+          - php8.3-common
+          - php8.3-mysql
+          - php8.3-curl
+          - php8.3-gd
+          - php8.3-mbstring
+          - php8.3-xml
+          - php8.3-zip
+          - unzip
+          - wget
+          - curl
+          - acl
+          - python3-pymysql
+        state: present
+
+    - name: Enable Apache modules (rewrite, headers, ssl)
+      apache2_module:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - rewrite
+        - headers
+        - ssl
+      notify: restart apache
+
+    - name: Install MariaDB server and client
+      apt:
+        name:
+          - mariadb-server
+          - mariadb-client
+        state: present
+
+    - name: Ensure MariaDB is started and enabled
+      service:
+        name: mariadb
+        state: started
+        enabled: yes
+
+    - name: Wait for MySQL socket
+      wait_for:
+        path: "{{ mysql_socket }}"
+        state: present
+        timeout: 60
+
+    - name: Set MariaDB root password (idempotent)
+      mysql_user:
+        name: root
+        password: "{{ db_root_password }}"
+        login_unix_socket: "{{ mysql_socket }}"
+        state: present
+
+    - name: Create /root/.my.cnf for root
+      copy:
+        dest: /root/.my.cnf
+        mode: '0600'
+        owner: root
+        group: root
+        content: |
+          [client]
+          user=root
+          password={{ db_root_password }}
+
+    - name: Remove anonymous MariaDB users
+      community.mysql.mysql_user:
+        name: ''
+        host_all: true
+        state: absent
+        login_unix_socket: "{{ mysql_socket }}"
+
+    - name: Remove MariaDB test database
+      community.mysql.mysql_db:
+        name: test
+        state: absent
+        login_unix_socket: "{{ mysql_socket }}"
+
+    - name: Disallow remote root login
+      community.mysql.mysql_user:
+        name: root
+        host: "%"
+        state: absent
+        login_unix_socket: "{{ mysql_socket }}"
+
+    - name: Create application database
+      community.mysql.mysql_db:
+        name: "{{ app_db_name }}"
+        state: present
+        encoding: "utf8mb4"
+        collation: "utf8mb4_unicode_ci"
+        login_unix_socket: "{{ mysql_socket }}"
+      when: create_app_db | bool
+
+    - name: Create application DB user (localhost)
+      community.mysql.mysql_user:
+        name: "{{ app_db_user }}"
+        password: "{{ app_db_password }}"
+        host: "localhost"
+        priv: "{{ app_db_name }}.*:ALL"
+        state: present
+        login_unix_socket: "{{ mysql_socket }}"
+      when: create_app_db | bool
+
+    - name: Ensure web root exists
+      file:
+        path: "{{ web_root }}"
+        state: directory
+        owner: "www-data"
+        group: "www-data"
+        mode: "0755"
+
+    - name: Deploy a simple PHP info page and index
+      copy:
+        dest: "{{ web_root }}/index.php"
+        content: |
+          <?php
+          phpinfo();
+          ?>
+        owner: "www-data"
+        group: "www-data"
+        mode: "0644"
+
+    # Discover public IP (IMDSv2-safe) for pre-cutover HTTPS by IP if no domain
+    - name: Set public_ip from EC2 fact if available
+      set_fact:
+        public_ip: "{{ ansible_ec2_public_ipv4 | default('', true) }}"
+      when: public_ip is not defined
+
+    - name: Get IMDSv2 token (AWS)
+      uri:
+        url: "http://169.254.169.254/latest/api/token"
+        method: PUT
+        headers:
+          X-aws-ec2-metadata-token-ttl-seconds: "21600"
+        return_content: yes
+        timeout: 2
+        status_code: 200
+      register: imds_token
+      failed_when: false
+      changed_when: false
+      when: (public_ip | default('')) == ''
+
+    - name: Get public IP via IMDSv2
+      uri:
+        url: "http://169.254.169.254/latest/meta-data/public-ipv4"
+        method: GET
+        headers:
+          X-aws-ec2-metadata-token: "{{ imds_token.content | default('') }}"
+        return_content: yes
+        timeout: 2
+      register: public_ip_result
+      failed_when: false
+      changed_when: false
+      when: (public_ip | default('')) == ''
+
+    - name: Set public_ip fact from IMDSv2 result
+      set_fact:
+        public_ip: "{{ public_ip_result.content | default('', true) }}"
+      when: (public_ip | default('')) == '' and (public_ip_result is defined)
+
+    # Apache vhosts
+    - name: Configure Apache HTTP vhost (:80)
+      copy:
+        dest: "/etc/apache2/sites-available/{{ site_name }}.conf"
+        mode: "0644"
+        content: |
+          <VirtualHost *:80>
+              ServerAdmin webmaster@localhost
+              {% if domain_name|length > 0 -%}
+              ServerName {{ domain_name }}
+              {%- endif %}
+              {% if public_ip is defined and public_ip|length > 0 -%}
+              ServerAlias {{ public_ip }}
+              {%- endif %}
+              DocumentRoot {{ web_root }}
+
+              <Directory {{ web_root }}>
+                  Options FollowSymLinks
+                  AllowOverride All
+                  Require all granted
+              </Directory>
+
+              ErrorLog ${APACHE_LOG_DIR}/{{ site_name }}_error.log
+              CustomLog ${APACHE_LOG_DIR}/{{ site_name }}_access.log combined
+          </VirtualHost>
+      notify: restart apache
+
+    - name: Enable site (:80)
+      command: "a2ensite {{ site_name }}.conf"
+      args:
+        creates: "/etc/apache2/sites-enabled/{{ site_name }}.conf"
+      notify: restart apache
+
+    - name: Ensure Apache is started and enabled
+      service:
+        name: apache2
+        state: started
+        enabled: yes
+
+    # Self-signed SSL (pre-cutover)
+    - name: Create directories for self-signed SSL
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "/etc/ssl/selfsigned"
+        - "/etc/ssl/certs"
+      when: enable_https and use_self_signed_ssl
+
+    - name: Generate self-signed cert (365 days)
+      command: >
+        openssl req -x509 -nodes -newkey rsa:2048 -days 365
+        -keyout /etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else public_ip) }}.key
+        -out /etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else public_ip) }}.crt
+        -subj "/CN={{ (domain_name if domain_name|length > 0 else public_ip) }}"
+        {{ '-addext "subjectAltName = DNS:' ~ domain_name ~ '"' if domain_name|length > 0 else ('-addext "subjectAltName = IP:' ~ public_ip ~ '"') }}
+      args:
+        creates: "/etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else public_ip) }}.crt"
+      when: enable_https and use_self_signed_ssl
+
+    - name: Restrict private key permissions
+      file:
+        path: "/etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else public_ip) }}.key"
+        owner: root
+        group: root
+        mode: "0600"
+      when: enable_https and use_self_signed_ssl
+
+    - name: Generate DH params (once)
+      command: "openssl dhparam -out /etc/ssl/certs/dhparam.pem 2048"
+      args:
+        creates: "/etc/ssl/certs/dhparam.pem"
+      when: enable_https and use_self_signed_ssl
+
+    - name: Create SSL vhost (:443) using self-signed cert
+      copy:
+        dest: "/etc/apache2/sites-available/{{ site_name }}-ssl.conf"
+        mode: "0644"
+        content: |
+          <IfModule mod_ssl.c>
+          <VirtualHost *:443>
+              ServerAdmin webmaster@localhost
+              {% if domain_name|length > 0 -%}
+              ServerName {{ domain_name }}
+              {%- endif %}
+              {% if public_ip is defined and public_ip|length > 0 -%}
+              ServerAlias {{ public_ip }}
+              {%- endif %}
+              DocumentRoot {{ web_root }}
+
+              <Directory {{ web_root }}>
+                  Options FollowSymLinks
+                  AllowOverride All
+                  Require all granted
+              </Directory>
+
+              ErrorLog ${APACHE_LOG_DIR}/{{ site_name }}_ssl_error.log
+              CustomLog ${APACHE_LOG_DIR}/{{ site_name }}_ssl_access.log combined
+
+              SSLEngine on
+              SSLCertificateFile /etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else public_ip) }}.crt
+              SSLCertificateKeyFile /etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else public_ip) }}.key
+              SSLOpenSSLConfCmd DHParameters /etc/ssl/certs/dhparam.pem
+
+              # Security headers
+              Header always set Strict-Transport-Security "max-age=0"
+              Header always set X-Content-Type-Options "nosniff"
+              Header always set X-Frame-Options "SAMEORIGIN"
+              Header always set X-XSS-Protection "1; mode=block"
+              Header always set Referrer-Policy "strict-origin-when-cross-origin"
+          </VirtualHost>
+          </IfModule>
+      when: enable_https and use_self_signed_ssl
+      notify: restart apache
+
+    - name: Enable SSL vhost (:443)
+      command: "a2ensite {{ site_name }}-ssl.conf"
+      when: enable_https and use_self_signed_ssl
+      notify: restart apache
+
+    # Let's Encrypt cutover (when DNS ready)
+    - name: Install Certbot
+      apt:
+        name:
+          - certbot
+          - python3-certbot-apache
+        state: present
+      when: enable_letsencrypt
+
+    - name: Obtain and install Let's Encrypt certificate
+      command: >
+        certbot --apache --non-interactive --agree-tos
+        -m {{ letsencrypt_email }}
+        -d {{ domain_name }}
+      when: enable_letsencrypt and domain_name|length > 0
+      notify: restart apache
+
+    - name: Enable Certbot auto-renew timer
+      systemd:
+        name: certbot.timer
+        enabled: yes
+        state: started
+      when: enable_letsencrypt
+
+    # Health/info
+    - name: Check local MariaDB is reachable
+      shell: "mysqladmin --socket={{ mysql_socket }} ping"
+      register: db_ping
+      changed_when: false
+      failed_when: db_ping.rc != 0
+
+    - name: Print LAMP deployment info
+      debug:
+        msg:
+          - "=========================================="
+          - "LAMP deployed on: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "Site root: {{ web_root }}"
+          - "HTTP:  http://{{ public_ip | default(ansible_default_ipv4.address, true) }}/"
+          - "HTTPS: {{ 'enabled (self-signed)' if (enable_https and use_self_signed_ssl) else (enable_letsencrypt | ternary('enabled (LE)', 'disabled')) }}"
+          - "DB:    {{ 'OK' if db_ping.rc == 0 else 'UNREACHABLE' }}"
+          - "=========================================="
+
+  handlers:
+    - name: restart apache
+      service:
+        name: apache2
+        state: restarted
