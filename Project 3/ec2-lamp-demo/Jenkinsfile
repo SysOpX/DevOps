@@ -45,8 +45,3 @@ ansible-playbook -i aws_ec2.yml lamp_ssl.yml
 
 echo "Cleaning workspace..."
 rm -rf "$WORKSPACE"/* || true
-
-
-
-
-
