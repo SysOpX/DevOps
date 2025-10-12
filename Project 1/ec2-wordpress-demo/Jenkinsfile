@@ -5,7 +5,7 @@ set -x
 # Configuration
 SSH_USER="ubuntu"
 SSH_KEY="/etc/ansible/keys/external-servers.pem"     # readable by jenkins via group (chmod 640 + chgrp)
-TF_DIR="ec2-wordpress-svr/Terraform"
+TF_DIR="Project 1/ec2-wordpress-demo/Terraform"
 ANS_DIR="Ansible"
 
 
