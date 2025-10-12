@@ -5,7 +5,7 @@ set -x
 # Configuration
 SSH_USER="ubuntu"
 SSH_KEY="/etc/ansible/keys/external-servers.pem"     # readable by jenkins via group (chmod 640 + chgrp)
-TF_DIR="ec2-wordpress-svr/Terraform"
+TF_DIR="ec2-bootstrap-demo/Terraform"
 ANS_DIR="Ansible"
 
 
@@ -39,7 +39,7 @@ timeout 300 bash -c 'until ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHos
 
 
 # Ansible
-echo "Deploying Wordpress using Ansible playbook..."
+echo "Updating EC2 using Ansible playbook..."
 cd "../${ANS_DIR}"
 ansible-playbook -i aws_ec2.yml wordpress.yml 
 
