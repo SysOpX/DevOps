@@ -41,7 +41,7 @@ timeout 300 bash -c 'until ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHos
 # Ansible
 echo "Updating EC2 using Ansible playbook..."
 cd "../${ANS_DIR}"
-ansible-playbook -i aws_ec2.yml wordpress.yml 
+ansible-playbook -i aws_ec2.yml bootstrap.yml 
 
 echo "Cleaning workspace..."
 rm -rf "$WORKSPACE"/* || true
