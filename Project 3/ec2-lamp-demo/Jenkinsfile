@@ -5,7 +5,7 @@ set -x
 # Configuration
 SSH_USER="ubuntu"
 SSH_KEY="/etc/ansible/keys/external-servers.pem"     # readable by jenkins via group (chmod 640 + chgrp)
-TF_DIR="ec2-wordpress-svr/Terraform"
+TF_DIR="Project 3/ec2-lamp-demo/Terraform"
 ANS_DIR="Ansible"
 
 
@@ -41,10 +41,11 @@ timeout 300 bash -c 'until ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHos
 # Ansible
 echo "Deploying Wordpress using Ansible playbook..."
 cd "../${ANS_DIR}"
-ansible-playbook -i aws_ec2.yml wordpress.yml 
+ansible-playbook -i aws_ec2.yml lamp_ssl.yml 
 
 echo "Cleaning workspace..."
 rm -rf "$WORKSPACE"/* || true
+
 
 
 
