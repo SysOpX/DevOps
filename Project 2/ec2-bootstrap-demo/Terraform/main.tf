@@ -33,7 +33,7 @@ resource "aws_instance" "web" {
   }
 
   tags = {
-    Environment = "Website"
+    Environment = "App"
     ManagedBy = "Terraform"
     Name = "${var.name}-terraform"
   }
