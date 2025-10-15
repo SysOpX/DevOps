@@ -11,8 +11,8 @@
     ansible_host_key_checking: false
 
     # New: domain variable used across paths and vhosts
-    new_hostname: "cp-birchtree-web" # Changeme
-    domain: "birchtree" # Changeme
+    new_hostname: "ec2-wordpress-demo" # Changeme
+    domain: "example" # Changeme
 
     wp_version: "6.8.2"
     php_version: "8.3"
@@ -24,8 +24,8 @@
     db_host: "127.0.0.1"
     mysql_socket: "/var/run/mysqld/mysqld.sock"
 
-    domain_name: "{{ lookup('env', 'DOMAIN_NAME') | default('birchtree.com.ph', true) }}" # Changeme
-    letsencrypt_email: "{{ lookup('env', 'LETSENCRYPT_EMAIL') | default('cloudadm@centurypacific.com.ph', true) }}"
+    domain_name: "{{ lookup('env', 'DOMAIN_NAME') | default('example.com', true) }}" # Changeme
+    letsencrypt_email: "{{ lookup('env', 'LETSENCRYPT_EMAIL') | default('admin@example.com', true) }}"
     enable_https: true
     # Pre-cutover: keep true. Set to false at cutover.
     use_self_signed_ssl: true
