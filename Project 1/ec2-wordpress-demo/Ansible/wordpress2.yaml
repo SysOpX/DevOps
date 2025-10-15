@@ -19,7 +19,7 @@
     wp_install_dir: "/var/www/html/{{ domain }}"
 
     db_name: "exampledb" # Changeme
-    db_user: "EXAMPLECONNECT" # Changeme
+    db_user: "exampleconnect" # Changeme
     db_password: "{{ lookup('env', 'DB_PASSWORD') | default('Mmv3Gl79@PYx4kEL', true) }}"
     db_host: "127.0.0.1"
     mysql_socket: "/var/run/mysqld/mysqld.sock"
@@ -160,6 +160,7 @@
         encoding: "utf8mb4"
         collation: "utf8mb4_unicode_ci"
         login_unix_socket: "{{ mysql_socket }}"
+        column_case_sensitive: false
 
     - name: Create WordPress DB user for localhost (socket)
       community.mysql.mysql_user:
@@ -169,6 +170,7 @@
         priv: "{{ db_name }}.*:ALL"
         state: present
         login_unix_socket: "{{ mysql_socket }}"
+        column_case_sensitive: false
 
     - name: Create WordPress DB user for 127.0.0.1 (TCP)
       community.mysql.mysql_user:
@@ -178,6 +180,7 @@
         priv: "{{ db_name }}.*:ALL"
         state: present
         login_unix_socket: "{{ mysql_socket }}"
+        column_case_sensitive: false
 
     - name: Create content provider user for migration
       user:
@@ -329,6 +332,69 @@
         owner: "www-data"
         group: "www-data"
         mode: "0640"
+
+    # -------- Ensure wp-content is collaborative (group-writable) --------
+    - name: Ensure wp-content base and subdirs exist with SGID and group write
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "www-data"
+        group: "www-data"
+        mode: "2775"
+      loop:
+        - "{{ wp_install_dir }}/wp-content"
+        - "{{ wp_install_dir }}/wp-content/plugins"
+        - "{{ wp_install_dir }}/wp-content/themes"
+        - "{{ wp_install_dir }}/wp-content/uploads"
+
+    - name: Ensure directories under content are SGID and group-writable
+      shell: |
+        find {{ item }} -type d -exec chmod 2775 {} +
+      args:
+        executable: /bin/bash
+      loop:
+        - "{{ wp_install_dir }}/wp-content/plugins"
+        - "{{ wp_install_dir }}/wp-content/themes"
+        - "{{ wp_install_dir }}/wp-content/uploads"
+
+    - name: Ensure files under content are group-writable
+      shell: |
+        find {{ item }} -type f -exec chmod 664 {} +
+      args:
+        executable: /bin/bash
+      loop:
+        - "{{ wp_install_dir }}/wp-content/plugins"
+        - "{{ wp_install_dir }}/wp-content/themes"
+        - "{{ wp_install_dir }}/wp-content/uploads"
+
+    - name: Set default ACLs for www-data on wp-content (keeps new files writable)
+      acl:
+        path: "{{ item }}"
+        entity: "www-data"
+        etype: group
+        permissions: rwX
+        state: present
+        default: yes
+      loop:
+        - "{{ wp_install_dir }}/wp-content"
+        - "{{ wp_install_dir }}/wp-content/plugins"
+        - "{{ wp_install_dir }}/wp-content/themes"
+        - "{{ wp_install_dir }}/wp-content/uploads"
+
+    - name: Optional - set default ACLs for content_user on wp-content
+      acl:
+        path: "{{ item }}"
+        entity: "{{ content_user }}"
+        etype: user
+        permissions: rwX
+        state: present
+        default: yes
+      loop:
+        - "{{ wp_install_dir }}/wp-content"
+        - "{{ wp_install_dir }}/wp-content/plugins"
+        - "{{ wp_install_dir }}/wp-content/themes"
+        - "{{ wp_install_dir }}/wp-content/uploads"
+      when: content_user is defined and content_user|length > 0
 
     # -------- phpMyAdmin installation and config --------
     - name: Preseed phpmyadmin debconf to skip dbconfig-common
@@ -798,7 +864,7 @@
           - "  HTTPS: https://{{ domain_name }}/phpmyadmin"
           - "  Public IP (pre-cutover): http{{ 's' if enable_https else '' }}://{{ public_ip }}/phpmyadmin"
           - "Migration user:"
-          - "  Username: {{ content_user }} (sudo, www-data)"
+          - "  Username: {{ content_user }} (sudo, www-data) — log out/in to refresh group membership"
           - "=========================================="
 
     - name: Cleanup temporary WordPress files
