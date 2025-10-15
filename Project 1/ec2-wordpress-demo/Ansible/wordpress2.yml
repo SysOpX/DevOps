@@ -18,7 +18,7 @@
     php_version: "8.3"
     wp_install_dir: "/var/www/html/{{ domain }}"
 
-    db_name: "example" # Changeme
+    db_name: "exampledb" # Changeme
     db_user: "exampleconnect" # Changeme
     db_password: "{{ lookup('env', 'DB_PASSWORD') | default('Mmv3Gl79@PYx4kEL', true) }}"
     db_host: "127.0.0.1"
