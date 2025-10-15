@@ -160,7 +160,6 @@
         encoding: "utf8mb4"
         collation: "utf8mb4_unicode_ci"
         login_unix_socket: "{{ mysql_socket }}"
-        column_case_sensitive: false
 
     - name: Create WordPress DB user for localhost (socket)
       community.mysql.mysql_user:
@@ -170,7 +169,6 @@
         priv: "{{ db_name }}.*:ALL"
         state: present
         login_unix_socket: "{{ mysql_socket }}"
-        column_case_sensitive: false
 
     - name: Create WordPress DB user for 127.0.0.1 (TCP)
       community.mysql.mysql_user:
@@ -180,7 +178,6 @@
         priv: "{{ db_name }}.*:ALL"
         state: present
         login_unix_socket: "{{ mysql_socket }}"
-        column_case_sensitive: false
 
     - name: Create content provider user for migration
       user:
