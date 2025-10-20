@@ -142,7 +142,15 @@
           [client]
           user=root
           password={{ db_root_password }}
-
+          
+    - name: Disable root password login, enable unix_socket auth
+      community.mysql.mysql_user:
+        name: root
+        host: localhost
+        plugin: unix_socket
+        state: present
+        login_unix_socket: "{{ mysql_socket }}"
+        
     - name: Remove anonymous MariaDB users
       community.mysql.mysql_user:
         name: ''
@@ -483,3 +491,4 @@
       service:
         name: apache2
         state: restarted
+
