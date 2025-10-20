@@ -268,6 +268,11 @@
               {% if public_ip is defined and public_ip|length > 0 -%}
               ServerAlias {{ public_ip }}
               {%- endif %}
+
+              {% if enable_https %}
+              # Redirect all HTTP requests to HTTPS
+              Redirect permanent / https://{{ domain_name if domain_name|length > 0 else public_ip }}/
+              {% else %}
               DocumentRoot {{ web_root }}
 
               <Directory {{ web_root }}>
@@ -275,6 +280,7 @@
                   AllowOverride All
                   Require all granted
               </Directory>
+              {% endif %}
 
               ErrorLog ${APACHE_LOG_DIR}/{{ site_name }}_error.log
               CustomLog ${APACHE_LOG_DIR}/{{ site_name }}_access.log combined
