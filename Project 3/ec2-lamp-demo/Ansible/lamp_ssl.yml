@@ -225,6 +225,8 @@
         creates: /var/lib/mysql/phpmyadmin
       become: yes
       become_user: mysql
+      environment:
+        HOME: /tmp
       ignore_errors: yes
 
     - name: Create phpMyAdmin control user in MariaDB
