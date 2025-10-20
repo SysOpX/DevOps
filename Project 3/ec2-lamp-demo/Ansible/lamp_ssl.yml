@@ -36,6 +36,14 @@
     enable_letsencrypt: "{{ enable_https and (not use_self_signed_ssl) | bool }}"
 
   pre_tasks:
+    - name: Ensure Ansible remote_tmp directory exists with correct permissions
+      file:
+        path: /tmp/.ansible/tmp
+        state: directory
+        mode: '1777'
+        owner: root
+        group: root
+
     - name: Verify Ubuntu 24.04
       assert:
         that:
@@ -219,6 +227,12 @@
         creates: /etc/apache2/conf-enabled/phpmyadmin.conf
       notify: restart apache
 
+    - name: Create phpMyAdmin control database if missing
+      community.mysql.mysql_db:
+        name: phpmyadmin
+        state: present
+        login_unix_socket: "{{ mysql_socket }}"
+
     - name: Create phpMyAdmin control database tables if missing
       shell: mysql < /usr/share/phpmyadmin/sql/create_tables.sql
       args:
@@ -229,7 +243,7 @@
         HOME: /tmp
       ignore_errors: yes
 
-    - name: Create phpMyAdmin control user in MariaDB
+    - name: Create phpMyAdmin control user in MariaDB with proper privileges
       community.mysql.mysql_user:
         name: phpmyadmin
         password: "{{ phpmyadmin_control_password }}"
