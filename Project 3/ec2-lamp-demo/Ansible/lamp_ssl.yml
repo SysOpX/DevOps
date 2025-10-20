@@ -239,15 +239,19 @@
     - name: Ensure phpMyAdmin control user is set in config-db.php
       lineinfile:
         path: /etc/phpmyadmin/config-db.php
-        regexp: '^\$cfg\[\'Servers\'\]\[\$i\]\[\'controluser\'\]'
-        line: '$cfg[\'Servers\'][$i][\'controluser\'] = ''phpmyadmin'';'
+        regexp: |
+          ^\$cfg\['Servers'\]\[\$i\]\['controluser'\]
+        line: |
+          $cfg['Servers'][$i]['controluser'] = 'phpmyadmin';
         create: yes
 
     - name: Ensure phpMyAdmin control password is set in config-db.php
       lineinfile:
         path: /etc/phpmyadmin/config-db.php
-        regexp: '^\$cfg\[\'Servers\'\]\[\$i\]\[\'controlpass\'\]'
-        line: '$cfg[\'Servers\'][$i][\'controlpass\'] = ''{{ phpmyadmin_control_password }}'';'
+        regexp: |
+          ^\$cfg\['Servers'\]\[\$i\]\['controlpass'\]
+        line: |
+          $cfg['Servers'][$i]['controlpass'] = '{{ phpmyadmin_control_password }}';
         create: yes
 
     - name: Set public_ip from EC2 fact if available
@@ -463,4 +467,5 @@
       service:
         name: apache2
         state: restarted
+
 
