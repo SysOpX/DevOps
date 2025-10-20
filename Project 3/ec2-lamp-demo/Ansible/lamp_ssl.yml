@@ -278,7 +278,132 @@
           $cfg['Servers'][$i]['controlpass'] = '{{ phpmyadmin_control_password }}';
         create: yes
 
-    # ... (rest of your playbook unchanged) ...
+    # SSL / HTTPS setup
+
+    - name: Create directories for self-signed SSL
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop:
+        - "/etc/ssl/selfsigned"
+        - "/etc/ssl/certs"
+      when: enable_https and use_self_signed_ssl
+
+    - name: Generate self-signed cert (365 days)
+      command: >
+        openssl req -x509 -nodes -newkey rsa:2048 -days 365
+        -keyout /etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else public_ip) }}.key
+        -out /etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else public_ip) }}.crt
+        -subj "/CN={{ (domain_name if domain_name|length > 0 else public_ip) }}"
+        {{ '-addext "subjectAltName = DNS:' ~ domain_name ~ '"' if domain_name|length > 0 else ('-addext "subjectAltName = IP:' ~ public_ip ~ '"') }}
+      args:
+        creates: "/etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else public_ip) }}.crt"
+      when: enable_https and use_self_signed_ssl
+
+    - name: Restrict private key permissions
+      file:
+        path: "/etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else public_ip) }}.key"
+        owner: root
+        group: root
+        mode: "0600"
+      when: enable_https and use_self_signed_ssl
+
+    - name: Generate DH params (once)
+      command: "openssl dhparam -out /etc/ssl/certs/dhparam.pem 2048"
+      args:
+        creates: "/etc/ssl/certs/dhparam.pem"
+      when: enable_https and use_self_signed_ssl
+
+    - name: Create SSL vhost (:443) using self-signed cert
+      copy:
+        dest: "/etc/apache2/sites-available/{{ site_name }}-ssl.conf"
+        mode: "0644"
+        content: |
+          <IfModule mod_ssl.c>
+          <VirtualHost *:443>
+              ServerAdmin webmaster@localhost
+              {% if domain_name|length > 0 -%}
+              ServerName {{ domain_name }}
+              {%- endif %}
+              {% if public_ip is defined and public_ip|length > 0 -%}
+              ServerAlias {{ public_ip }}
+              {%- endif %}
+              DocumentRoot {{ web_root }}
+
+              <Directory {{ web_root }}>
+                  Options FollowSymLinks
+                  AllowOverride All
+                  Require all granted
+              </Directory>
+
+              ErrorLog ${APACHE_LOG_DIR}/{{ site_name }}_ssl_error.log
+              CustomLog ${APACHE_LOG_DIR}/{{ site_name }}_ssl_access.log combined
+
+              SSLEngine on
+              SSLCertificateFile /etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else public_ip) }}.crt
+              SSLCertificateKeyFile /etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else public_ip) }}.key
+              SSLOpenSSLConfCmd DHParameters /etc/ssl/certs/dhparam.pem
+
+              # Security headers
+              Header always set Strict-Transport-Security "max-age=0"
+              Header always set X-Content-Type-Options "nosniff"
+              Header always set X-Frame-Options "SAMEORIGIN"
+              Header always set X-XSS-Protection "1; mode=block"
+              Header always set Referrer-Policy "strict-origin-when-cross-origin"
+          </VirtualHost>
+          </IfModule>
+      when: enable_https and use_self_signed_ssl
+      notify: restart apache
+
+    - name: Enable SSL vhost (:443)
+      command: "a2ensite {{ site_name }}-ssl.conf"
+      when: enable_https and use_self_signed_ssl
+      notify: restart apache
+
+    # Let's Encrypt cutover (when DNS ready)
+    - name: Install Certbot
+      apt:
+        name:
+          - certbot
+          - python3-certbot-apache
+        state: present
+      when: enable_letsencrypt
+
+    - name: Obtain and install Let's Encrypt certificate
+      command: >
+        certbot --apache --non-interactive --agree-tos
+        -m {{ letsencrypt_email }}
+        -d {{ domain_name }}
+      when: enable_letsencrypt and domain_name|length > 0
+      notify: restart apache
+
+    - name: Enable Certbot auto-renew timer
+      systemd:
+        name: certbot.timer
+        enabled: yes
+        state: started
+      when: enable_letsencrypt
+
+    # Health/info
+    - name: Check local MariaDB is reachable
+      shell: "mysqladmin --socket={{ mysql_socket }} ping"
+      register: db_ping
+      changed_when: false
+      failed_when: db_ping.rc != 0
+
+    - name: Print LAMP deployment info
+      debug:
+        msg:
+          - "=========================================="
+          - "LAMP deployed on: {{ ansible_distribution }} {{ ansible_distribution_version }}"
+          - "Site root: {{ web_root }}"
+          - "HTTP:  http://{{ public_ip | default(ansible_default_ipv4.address, true) }}/"
+          - "HTTPS: {{ 'enabled (self-signed)' if (enable_https and use_self_signed_ssl) else (enable_letsencrypt | ternary('enabled (LE)', 'disabled')) }}"
+          - "DB:    {{ 'OK' if db_ping.rc == 0 else 'UNREACHABLE' }}"
+          - "=========================================="
 
   handlers:
     - name: restart apache
