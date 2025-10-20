@@ -1,4 +1,4 @@
-- name: Deploy LAMP (Apache + PHP 8.3 + MariaDB) with HTTPS on Ubuntu 24.04
+- name: Deploy LAMP stack with phpMyAdmin and HTTPS on Ubuntu 24.04
   hosts: aws_ec2
   become: yes
   remote_user: ubuntu
@@ -12,7 +12,7 @@
 
     # Hostname and site basics
     new_hostname: "ec2-lamp-demo"
-    site_name: "example"                        # used for filenames
+    site_name: "example"
     php_version: "8.3"
     web_root: "/var/www/html/{{ site_name }}"
 
@@ -24,15 +24,14 @@
     app_db_password: "{{ lookup('env', 'APP_DB_PASSWORD') | default('ChangeMe_App!', true) }}"
     mysql_socket: "/var/run/mysqld/mysqld.sock"
 
-    # phpMyAdmin control user password (now using appconnect user)
+    # phpMyAdmin control user (using appconnect user)
     phpmyadmin_control_user: "{{ app_db_user }}"
     phpmyadmin_control_password: "{{ app_db_password }}"
 
-    # HTTPS and cutover strategy
-    domain_name: "{{ lookup('env', 'DOMAIN_NAME') | default('', true) }}"   # leave empty to serve by IP first
+    # HTTPS and domain
+    domain_name: "{{ lookup('env', 'DOMAIN_NAME') | default('', true) }}"
     letsencrypt_email: "{{ lookup('env', 'LETSENCRYPT_EMAIL') | default('admin@example.com', true) }}"
     enable_https: true
-    # pre-cutover: self-signed against IP or domain
     use_self_signed_ssl: true
     enable_letsencrypt: "{{ enable_https and (not use_self_signed_ssl) | bool }}"
 
@@ -73,44 +72,6 @@
       apt:
         update_cache: yes
         cache_valid_time: 1800
-
-    # Ensure public_ip is defined before SSL tasks
-    - name: Set public_ip from EC2 fact if available
-      set_fact:
-        public_ip: "{{ ansible_ec2_public_ipv4 | default('', true) }}"
-      when: public_ip is not defined
-
-    - name: Get IMDSv2 token (AWS)
-      uri:
-        url: "http://169.254.169.254/latest/api/token"
-        method: PUT
-        headers:
-          X-aws-ec2-metadata-token-ttl-seconds: "21600"
-        return_content: yes
-        timeout: 2
-        status_code: 200
-      register: imds_token
-      failed_when: false
-      changed_when: false
-      when: (public_ip | default('')) == ''
-
-    - name: Get public IP via IMDSv2
-      uri:
-        url: "http://169.254.169.254/latest/meta-data/public-ipv4"
-        method: GET
-        headers:
-          X-aws-ec2-metadata-token: "{{ imds_token.content | default('') }}"
-        return_content: yes
-        timeout: 2
-      register: public_ip_result
-      failed_when: false
-      changed_when: false
-      when: (public_ip | default('')) == ''
-
-    - name: Set public_ip fact from IMDSv2 result
-      set_fact:
-        public_ip: "{{ public_ip_result.content | default('', true) }}"
-      when: (public_ip | default('')) == '' and (public_ip_result is defined)
 
   tasks:
     - name: Install Apache, PHP 8.3, and common extensions
@@ -171,7 +132,7 @@
         login_unix_socket: "{{ mysql_socket }}"
         state: present
 
-    - name: Create /root/.my.cnf for root
+    - name: Create /root/.my.cnf for root user
       copy:
         dest: /root/.my.cnf
         mode: '0600'
@@ -274,8 +235,6 @@
         creates: /etc/apache2/conf-enabled/phpmyadmin.conf
       notify: restart apache
 
-    # Remove phpmyadmin control database and user creation tasks
-
     - name: Ensure phpMyAdmin control user is set in config-db.php
       lineinfile:
         path: /etc/phpmyadmin/config-db.php
@@ -291,7 +250,6 @@
         create: yes
 
     # SSL / HTTPS setup
-
     - name: Create directories for self-signed SSL
       file:
         path: "{{ item }}"
@@ -307,17 +265,17 @@
     - name: Generate self-signed cert (365 days)
       command: >
         openssl req -x509 -nodes -newkey rsa:2048 -days 365
-        -keyout /etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else public_ip) }}.key
-        -out /etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else public_ip) }}.crt
-        -subj "/CN={{ (domain_name if domain_name|length > 0 else public_ip) }}"
-        {{ '-addext "subjectAltName = DNS:' ~ domain_name ~ '"' if domain_name|length > 0 else ('-addext "subjectAltName = IP:' ~ public_ip ~ '"') }}
+        -keyout /etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else ansible_default_ipv4.address) }}.key
+        -out /etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else ansible_default_ipv4.address) }}.crt
+        -subj "/CN={{ (domain_name if domain_name|length > 0 else ansible_default_ipv4.address) }}"
+        {{ '-addext "subjectAltName = DNS:' ~ domain_name ~ '"' if domain_name|length > 0 else ('-addext "subjectAltName = IP:' ~ ansible_default_ipv4.address ~ '"') }}
       args:
-        creates: "/etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else public_ip) }}.crt"
+        creates: "/etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else ansible_default_ipv4.address) }}.crt"
       when: enable_https and use_self_signed_ssl
 
     - name: Restrict private key permissions
       file:
-        path: "/etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else public_ip) }}.key"
+        path: "/etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else ansible_default_ipv4.address) }}.key"
         owner: root
         group: root
         mode: "0600"
@@ -340,9 +298,8 @@
               {% if domain_name|length > 0 -%}
               ServerName {{ domain_name }}
               {%- endif %}
-              {% if public_ip is defined and public_ip|length > 0 -%}
-              ServerAlias {{ public_ip }}
-              {%- endif %}
+              ServerAlias {{ ansible_default_ipv4.address }}
+
               DocumentRoot {{ web_root }}
 
               <Directory {{ web_root }}>
@@ -355,8 +312,8 @@
               CustomLog ${APACHE_LOG_DIR}/{{ site_name }}_ssl_access.log combined
 
               SSLEngine on
-              SSLCertificateFile /etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else public_ip) }}.crt
-              SSLCertificateKeyFile /etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else public_ip) }}.key
+              SSLCertificateFile /etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else ansible_default_ipv4.address) }}.crt
+              SSLCertificateKeyFile /etc/ssl/selfsigned/{{ (domain_name if domain_name|length > 0 else ansible_default_ipv4.address) }}.key
               SSLOpenSSLConfCmd DHParameters /etc/ssl/certs/dhparam.pem
 
               # Security headers
@@ -410,13 +367,11 @@
               {% if domain_name|length > 0 -%}
               ServerName {{ domain_name }}
               {%- endif %}
-              {% if public_ip is defined and public_ip|length > 0 -%}
-              ServerAlias {{ public_ip }}
-              {%- endif %}
+              ServerAlias {{ ansible_default_ipv4.address }}
 
               {% if enable_https %}
               # Redirect all HTTP requests to HTTPS
-              Redirect permanent / https://{{ domain_name if domain_name|length > 0 else public_ip }}/
+              Redirect permanent / https://{{ domain_name if domain_name|length > 0 else ansible_default_ipv4.address }}/
               {% else %}
               DocumentRoot {{ web_root }}
 
@@ -457,7 +412,7 @@
           - "=========================================="
           - "LAMP deployed on: {{ ansible_distribution }} {{ ansible_distribution_version }}"
           - "Site root: {{ web_root }}"
-          - "HTTP:  http://{{ public_ip | default(ansible_default_ipv4.address, true) }}/"
+          - "HTTP:  http://{{ ansible_default_ipv4.address }}/"
           - "HTTPS: {{ 'enabled (self-signed)' if (enable_https and use_self_signed_ssl) else (enable_letsencrypt | ternary('enabled (LE)', 'disabled')) }}"
           - "DB:    {{ 'OK' if db_ping.rc == 0 else 'UNREACHABLE' }}"
           - "=========================================="
