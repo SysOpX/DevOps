@@ -190,6 +190,32 @@
         group: "www-data"
         mode: "0644"
 
+    # phpMyAdmin installation and configuration
+    - name: Install phpMyAdmin and required PHP extensions
+      apt:
+        name:
+          - phpmyadmin
+          - php8.3-mbstring
+          - php8.3-zip
+        state: present
+
+    - name: Enable PHP mbstring extension
+      command: phpenmod mbstring
+      notify: restart apache
+
+    - name: Include phpMyAdmin Apache configuration
+      file:
+        src: /etc/phpmyadmin/apache.conf
+        dest: /etc/apache2/conf-available/phpmyadmin.conf
+        state: link
+      notify: restart apache
+
+    - name: Enable phpMyAdmin Apache config
+      command: a2enconf phpmyadmin.conf
+      args:
+        creates: /etc/apache2/conf-enabled/phpmyadmin.conf
+      notify: restart apache
+
     # Discover public IP (IMDSv2-safe) for pre-cutover HTTPS by IP if no domain
     - name: Set public_ip from EC2 fact if available
       set_fact:
@@ -397,5 +423,4 @@
     - name: restart apache
       service:
         name: apache2
-
         state: restarted
