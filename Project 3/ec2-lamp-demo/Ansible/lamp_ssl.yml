@@ -287,7 +287,6 @@
       become_user: mysql
       environment:
         HOME: /tmp
-      ignore_errors: yes
 
     - name: Create phpMyAdmin control user in MariaDB with proper privileges
       community.mysql.mysql_user:
@@ -295,8 +294,12 @@
         password: "{{ phpmyadmin_control_password }}"
         host: localhost
         priv: "phpmyadmin.*:SELECT,INSERT,UPDATE,DELETE"
+        plugin: mysql_native_password
         state: present
         login_unix_socket: "{{ mysql_socket }}"
+
+    - name: Flush MariaDB privileges
+      shell: mysqladmin flush-privileges --socket={{ mysql_socket }}
 
     - name: Ensure phpMyAdmin control user is set in config-db.php
       lineinfile:
