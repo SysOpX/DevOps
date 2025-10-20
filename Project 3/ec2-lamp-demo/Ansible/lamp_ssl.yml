@@ -220,7 +220,7 @@
       notify: restart apache
 
     - name: Create phpMyAdmin control database tables if missing
-      command: mysql < /usr/share/phpmyadmin/sql/create_tables.sql
+      shell: mysql < /usr/share/phpmyadmin/sql/create_tables.sql
       args:
         creates: /var/lib/mysql/phpmyadmin
       become: yes
@@ -467,5 +467,3 @@
       service:
         name: apache2
         state: restarted
-
-
