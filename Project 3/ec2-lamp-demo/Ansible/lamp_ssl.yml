@@ -73,6 +73,44 @@
         update_cache: yes
         cache_valid_time: 1800
 
+    # Ensure public_ip is defined before SSL tasks
+    - name: Set public_ip from EC2 fact if available
+      set_fact:
+        public_ip: "{{ ansible_ec2_public_ipv4 | default('', true) }}"
+      when: public_ip is not defined
+
+    - name: Get IMDSv2 token (AWS)
+      uri:
+        url: "http://169.254.169.254/latest/api/token"
+        method: PUT
+        headers:
+          X-aws-ec2-metadata-token-ttl-seconds: "21600"
+        return_content: yes
+        timeout: 2
+        status_code: 200
+      register: imds_token
+      failed_when: false
+      changed_when: false
+      when: (public_ip | default('')) == ''
+
+    - name: Get public IP via IMDSv2
+      uri:
+        url: "http://169.254.169.254/latest/meta-data/public-ipv4"
+        method: GET
+        headers:
+          X-aws-ec2-metadata-token: "{{ imds_token.content | default('') }}"
+        return_content: yes
+        timeout: 2
+      register: public_ip_result
+      failed_when: false
+      changed_when: false
+      when: (public_ip | default('')) == ''
+
+    - name: Set public_ip fact from IMDSv2 result
+      set_fact:
+        public_ip: "{{ public_ip_result.content | default('', true) }}"
+      when: (public_ip | default('')) == '' and (public_ip_result is defined)
+
   tasks:
     - name: Install Apache, PHP 8.3, and common extensions
       apt:
@@ -386,6 +424,51 @@
         enabled: yes
         state: started
       when: enable_letsencrypt
+
+    # Apache HTTP vhost with redirect to HTTPS if enabled
+    - name: Configure Apache HTTP vhost (:80)
+      copy:
+        dest: "/etc/apache2/sites-available/{{ site_name }}.conf"
+        mode: "0644"
+        content: |
+          <VirtualHost *:80>
+              ServerAdmin webmaster@localhost
+              {% if domain_name|length > 0 -%}
+              ServerName {{ domain_name }}
+              {%- endif %}
+              {% if public_ip is defined and public_ip|length > 0 -%}
+              ServerAlias {{ public_ip }}
+              {%- endif %}
+
+              {% if enable_https %}
+              # Redirect all HTTP requests to HTTPS
+              Redirect permanent / https://{{ domain_name if domain_name|length > 0 else public_ip }}/
+              {% else %}
+              DocumentRoot {{ web_root }}
+
+              <Directory {{ web_root }}>
+                  Options FollowSymLinks
+                  AllowOverride All
+                  Require all granted
+              </Directory>
+              {% endif %}
+
+              ErrorLog ${APACHE_LOG_DIR}/{{ site_name }}_error.log
+              CustomLog ${APACHE_LOG_DIR}/{{ site_name }}_access.log combined
+          </VirtualHost>
+      notify: restart apache
+
+    - name: Enable site (:80)
+      command: "a2ensite {{ site_name }}.conf"
+      args:
+        creates: "/etc/apache2/sites-enabled/{{ site_name }}.conf"
+      notify: restart apache
+
+    - name: Ensure Apache is started and enabled
+      service:
+        name: apache2
+        state: started
+        enabled: yes
 
     # Health/info
     - name: Check local MariaDB is reachable
