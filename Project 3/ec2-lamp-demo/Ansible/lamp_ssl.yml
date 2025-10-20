@@ -24,6 +24,9 @@
     app_db_password: "{{ lookup('env', 'APP_DB_PASSWORD') | default('ChangeMe_App!', true) }}"
     mysql_socket: "/var/run/mysqld/mysqld.sock"
 
+    # phpMyAdmin control user password
+    phpmyadmin_control_password: "{{ lookup('env', 'PHPMYADMIN_CONTROL_PASSWORD') | default('ChangeMe_PMA!', true) }}"
+
     # HTTPS and cutover strategy
     domain_name: "{{ lookup('env', 'DOMAIN_NAME') | default('', true) }}"   # leave empty to serve by IP first
     letsencrypt_email: "{{ lookup('env', 'LETSENCRYPT_EMAIL') | default('admin@example.com', true) }}"
@@ -216,7 +219,37 @@
         creates: /etc/apache2/conf-enabled/phpmyadmin.conf
       notify: restart apache
 
-    # Discover public IP (IMDSv2-safe) for pre-cutover HTTPS by IP if no domain
+    - name: Create phpMyAdmin control database tables if missing
+      command: mysql < /usr/share/phpmyadmin/sql/create_tables.sql
+      args:
+        creates: /var/lib/mysql/phpmyadmin
+      become: yes
+      become_user: mysql
+      ignore_errors: yes
+
+    - name: Create phpMyAdmin control user in MariaDB
+      community.mysql.mysql_user:
+        name: phpmyadmin
+        password: "{{ phpmyadmin_control_password }}"
+        host: localhost
+        priv: "phpmyadmin.*:SELECT,INSERT,UPDATE,DELETE"
+        state: present
+        login_unix_socket: "{{ mysql_socket }}"
+
+    - name: Ensure phpMyAdmin control user is set in config-db.php
+      lineinfile:
+        path: /etc/phpmyadmin/config-db.php
+        regexp: '^\\$cfg\\[\'Servers\'\\]\\[\\$i\\]\\[\'controluser\'\\]'
+        line: "$cfg['Servers'][$i]['controluser'] = 'phpmyadmin';"
+        create: yes
+
+    - name: Ensure phpMyAdmin control password is set in config-db.php
+      lineinfile:
+        path: /etc/phpmyadmin/config-db.php
+        regexp: '^\\$cfg\\[\'Servers\'\\]\\[\\$i\\]\\[\'controlpass\'\\]'
+        line: "$cfg['Servers'][$i]['controlpass'] = '{{ phpmyadmin_control_password }}';"
+        create: yes
+
     - name: Set public_ip from EC2 fact if available
       set_fact:
         public_ip: "{{ ansible_ec2_public_ipv4 | default('', true) }}"
