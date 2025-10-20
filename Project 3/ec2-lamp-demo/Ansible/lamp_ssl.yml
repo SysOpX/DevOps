@@ -24,8 +24,9 @@
     app_db_password: "{{ lookup('env', 'APP_DB_PASSWORD') | default('ChangeMe_App!', true) }}"
     mysql_socket: "/var/run/mysqld/mysqld.sock"
 
-    # phpMyAdmin control user password
-    phpmyadmin_control_password: "{{ lookup('env', 'PHPMYADMIN_CONTROL_PASSWORD') | default('ChangeMe_PMA!', true) }}"
+    # phpMyAdmin control user password (now using appconnect user)
+    phpmyadmin_control_user: "{{ app_db_user }}"
+    phpmyadmin_control_password: "{{ app_db_password }}"
 
     # HTTPS and cutover strategy
     domain_name: "{{ lookup('env', 'DOMAIN_NAME') | default('', true) }}"   # leave empty to serve by IP first
@@ -273,50 +274,20 @@
         creates: /etc/apache2/conf-enabled/phpmyadmin.conf
       notify: restart apache
 
-    - name: Create phpMyAdmin control database if missing
-      community.mysql.mysql_db:
-        name: phpmyadmin
-        state: present
-        login_unix_socket: "{{ mysql_socket }}"
-
-    - name: Create phpMyAdmin control database tables if missing
-      shell: mysql < /usr/share/phpmyadmin/sql/create_tables.sql
-      args:
-        creates: /var/lib/mysql/phpmyadmin
-      become: yes
-      become_user: mysql
-      environment:
-        HOME: /tmp
-
-    - name: Create phpMyAdmin control user in MariaDB with proper privileges
-      community.mysql.mysql_user:
-        name: phpmyadmin
-        password: "{{ phpmyadmin_control_password }}"
-        host: localhost
-        priv: "phpmyadmin.*:SELECT,INSERT,UPDATE,DELETE"
-        plugin: mysql_native_password
-        state: present
-        login_unix_socket: "{{ mysql_socket }}"
-
-    - name: Flush MariaDB privileges
-      shell: mysqladmin flush-privileges --socket={{ mysql_socket }}
+    # Remove phpmyadmin control database and user creation tasks
 
     - name: Ensure phpMyAdmin control user is set in config-db.php
       lineinfile:
         path: /etc/phpmyadmin/config-db.php
-        regexp: |
-          ^\$cfg\['Servers'\]\[\$i\]\['controluser'\]
-        line: |
-          $cfg['Servers'][$i]['controluser'] = 'phpmyadmin';
+        regexp: "^\\$cfg\\['Servers'\\]\\[\\$i\\]\\['controluser'\\]"
+        line: "$cfg['Servers'][$i]['controluser'] = '{{ phpmyadmin_control_user }}';"
         create: yes
 
     - name: Ensure phpMyAdmin control password is set in config-db.php
       lineinfile:
         path: /etc/phpmyadmin/config-db.php
-        regexp: |
-          ^\$cfg\['Servers'\]\[\$i\]\['controlpass'\]
-        line: |
-          $cfg['Servers'][$i]['controlpass'] = '{{ phpmyadmin_control_password }}';
+        regexp: "^\\$cfg\\['Servers'\\]\\[\\$i\\]\\['controlpass'\\]"
+        line: "$cfg['Servers'][$i]['controlpass'] = '{{ phpmyadmin_control_password }}';"
         create: yes
 
     # SSL / HTTPS setup
