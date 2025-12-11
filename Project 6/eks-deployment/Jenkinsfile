@@ -1,0 +1,47 @@
+#!/bin/bash
+set -euo pipefail
+set -x
+
+# Configuration
+SSH_USER="ubuntu"
+SSH_KEY="/etc/ansible/keys/external-servers.pem"     # readable by jenkins via group (chmod 640 + chgrp)
+TF_DIR="Project 3/eks-deployment/Terraform"
+ANS_DIR="Ansible"
+
+
+# Terraform
+cd "$TF_DIR"
+sed -i "s/server_name/${SERVER_NAME}/g" backend.tf
+export TF_VAR_name="${SERVER_NAME}"
+
+echo "Running Terrafrom init..."
+terraform init -reconfigure
+echo "Running Terrafrom plan..."
+terraform plan
+
+if [[ "${TERRAFORM_ACTION}" == "destroy" ]]; then
+  echo "Running Terrafrom destroy..."
+  terraform destroy -auto-approve
+  exit 0
+fi
+
+echo "Running Terrafrom apply..."
+terraform apply -auto-approve
+
+# Get the new host (for readiness checks only)
+HOST="$(terraform output -raw public_dns)"
+echo "Target host: ${HOST}"
+
+# Wait for SSH readiness on the new instance
+sleep 5
+timeout 300 bash -c 'until nc -z -w5 '"${HOST}"' 22 >/dev/null 2>&1; do echo "Waiting for TCP/22 on '"${HOST}"'..."; sleep 5; done'
+timeout 300 bash -c 'until ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -i '"${SSH_KEY}"' '"${SSH_USER}"'@'"${HOST}"' true; do echo "Waiting for SSH daemon on '"${HOST}"'..."; sleep 5; done'
+
+
+# Ansible
+echo "Deploying LAMP stack using Ansible playbook..."
+cd "../${ANS_DIR}"
+ansible-playbook -i aws_ec2.yml eks_deploy.yml 
+
+echo "Cleaning workspace..."
+rm -rf "$WORKSPACE"/* || true

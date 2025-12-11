@@ -1,0 +1,336 @@
+- name: Provision Ubuntu 24.04 DevOps Tooling
+  hosts: aws_ec2
+  become: yes
+  remote_user: ubuntu
+  gather_facts: true
+
+  vars:
+    ansible_ssh_private_key_file: "/etc/ansible/keys/external-servers.pem"
+    ansible_ssh_user: "ubuntu"
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o IdentitiesOnly=yes'
+    ansible_host_key_checking: false
+
+    # Hostname 
+    new_hostname: "ec2-devops-tooling"
+
+    # Versions / settings (tweak as needed)
+    jenkins_repo_key_url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+    jenkins_repo: "deb https://pkg.jenkins.io/debian-stable binary/"
+    jenkins_java_package: openjdk-21-jdk
+
+    terraform_version: "1.9.5"          # adjust as needed
+    terraform_zip_url: "https://releases.hashicorp.com/terraform/{{ terraform_version }}/terraform_{{ terraform_version }}_linux_amd64.zip"
+
+    kubectl_version: "v1.31.0"          # adjust as needed
+    kubectl_url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/amd64/kubectl"
+
+    eksctl_version: "latest_release"    # can use a specific tag instead
+    eksctl_url: "https://github.com/weaveworks/eksctl/releases/{{ eksctl_version }}/download/eksctl_Linux_amd64.tar.gz"
+
+    helm_version: "v3.16.2"             # adjust as needed
+    helm_url: "https://get.helm.sh/helm-{{ helm_version }}-linux-amd64.tar.gz"
+
+    trivy_apt_repo: "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main"
+    trivy_key_url: "https://aquasecurity.github.io/trivy-repo/deb/public.key"
+
+    docker_apt_gpg: /etc/apt/keyrings/docker.gpg
+    docker_repo: "deb [arch=amd64 signed-by={{ docker_apt_gpg }}] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+
+    # SonarQube in Docker
+    sonarqube_image: "sonarqube:lts"
+    sonarqube_container_name: "sonarqube"
+    sonarqube_host_port: 9000
+    sonarqube_container_port: 9000
+    sonarqube_data_dir: /opt/sonarqube/data
+    sonarqube_logs_dir: /opt/sonarqube/logs
+    sonarqube_extensions_dir: /opt/sonarqube/extensions
+
+  pre_tasks:
+    - name: Ensure Ansible remote_tmp directory exists with correct permissions
+      file:
+        path: /tmp/.ansible/tmp
+        state: directory
+        mode: '1777'
+        owner: root
+        group: root
+
+    - name: Verify Ubuntu 24.04
+      assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_version == "24.04"
+        fail_msg: "This playbook requires Ubuntu 24.04 (Noble)."
+        success_msg: "Ubuntu 24.04 detected."
+
+    - name: Set hostname
+      hostname:
+        name: "{{ new_hostname }}"
+
+    - name: Ensure /etc/hosts maps hostname
+      lineinfile:
+        path: /etc/hosts
+        regexp: '^127\.0\.1\.1'
+        line: "127.0.1.1 {{ new_hostname }}"
+        state: present
+
+    - name: Persist hostname
+      copy:
+        content: "{{ new_hostname }}"
+        dest: /etc/hostname
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 1800
+
+  tasks:
+    #######################################################################
+    # Base tools & dependencies
+    #######################################################################
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - unzip
+          - software-properties-common
+          - apt-transport-https
+          - git
+        state: present
+
+    #######################################################################
+    # JDK 21
+    #######################################################################
+    - name: Install JDK 21
+      ansible.builtin.apt:
+        name: "{{ jenkins_java_package }}"
+        state: present
+
+    #######################################################################
+    # Jenkins
+    #######################################################################
+    - name: Add Jenkins GPG key
+      ansible.builtin.get_url:
+        url: "{{ jenkins_repo_key_url }}"
+        dest: /usr/share/keyrings/jenkins-keyring.asc
+        mode: '0644'
+
+    - name: Add Jenkins apt repository
+      ansible.builtin.apt_repository:
+        repo: "{{ jenkins_repo }}"
+        filename: jenkins
+        state: present
+
+    - name: Install Jenkins
+      ansible.builtin.apt:
+        name: jenkins
+        state: present
+        update_cache: yes
+
+    - name: Ensure Jenkins service is enabled and started
+      ansible.builtin.systemd:
+        name: jenkins
+        enabled: yes
+        state: started
+
+    #######################################################################
+    # Terraform
+    #######################################################################
+    - name: Download Terraform archive
+      ansible.builtin.get_url:
+        url: "{{ terraform_zip_url }}"
+        dest: /tmp/terraform_amd64.zip
+        mode: '0644'
+
+    - name: Unzip Terraform binary
+      ansible.builtin.unarchive:
+        src: /tmp/terraform_amd64.zip
+        dest: /usr/local/bin/
+        mode: '0755'
+        remote_src: yes
+
+    - name: Ensure Terraform is executable
+      ansible.builtin.file:
+        path: /usr/local/bin/terraform
+        mode: '0755'
+        state: file
+
+    #######################################################################
+    # Ansible (from Ubuntu repo)
+    #######################################################################
+    - name: Install Ansible
+      ansible.builtin.apt:
+        name: ansible
+        state: present
+
+    #######################################################################
+    # kubectl
+    #######################################################################
+    - name: Download kubectl binary
+      ansible.builtin.get_url:
+        url: "{{ kubectl_url }}"
+        dest: /usr/local/bin/kubectl
+        mode: '0755'
+
+    #######################################################################
+    # eksctl
+    #######################################################################
+    - name: Download eksctl archive
+      ansible.builtin.get_url:
+        url: "{{ eksctl_url }}"
+        dest: /tmp/eksctl.tar.gz
+        mode: '0644'
+
+    - name: Unarchive eksctl
+      ansible.builtin.unarchive:
+        src: /tmp/eksctl.tar.gz
+        dest: /usr/local/bin/
+        remote_src: yes
+        mode: '0755'
+
+    #######################################################################
+    # Helm
+    #######################################################################
+    - name: Download Helm archive
+      ansible.builtin.get_url:
+        url: "{{ helm_url }}"
+        dest: /tmp/helm.tar.gz
+        mode: '0644'
+
+    - name: Unarchive Helm
+      ansible.builtin.unarchive:
+        src: /tmp/helm.tar.gz
+        dest: /tmp/
+        remote_src: yes
+
+    - name: Move Helm binary to /usr/local/bin
+      ansible.builtin.copy:
+        src: /tmp/linux-amd64/helm
+        dest: /usr/local/bin/helm
+        mode: '0755'
+        remote_src: yes
+
+    #######################################################################
+    # Docker Engine & Docker Compose Plugin
+    #######################################################################
+    - name: Add Docker GPG key directory
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Add Docker GPG key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: "{{ docker_apt_gpg }}"
+        mode: '0644'
+
+    - name: Add Docker apt repository
+      ansible.builtin.apt_repository:
+        repo: "{{ docker_repo }}"
+        filename: docker
+        state: present
+
+    - name: Install Docker Engine and CLI
+      ansible.builtin.apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+
+    - name: Ensure Docker service is enabled and started
+      ansible.builtin.systemd:
+        name: docker
+        enabled: yes
+        state: started
+
+    #######################################################################
+    # SonarQube via Docker
+    #######################################################################
+    - name: Create SonarQube directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: 1000
+        group: 1000
+        mode: '0755'
+      loop:
+        - "{{ sonarqube_data_dir }}"
+        - "{{ sonarqube_logs_dir }}"
+        - "{{ sonarqube_extensions_dir }}"
+
+    - name: Pull SonarQube Docker image
+      community.docker.docker_image:
+        name: "{{ sonarqube_image }}"
+        source: pull
+
+    - name: Run SonarQube container
+      community.docker.docker_container:
+        name: "{{ sonarqube_container_name }}"
+        image: "{{ sonarqube_image }}"
+        state: started
+        restart_policy: unless-stopped
+        ports:
+          - "{{ sonarqube_host_port }}:{{ sonarqube_container_port }}"
+        volumes:
+          - "{{ sonarqube_data_dir }}:/opt/sonarqube/data"
+          - "{{ sonarqube_logs_dir }}:/opt/sonarqube/logs"
+          - "{{ sonarqube_extensions_dir }}:/opt/sonarqube/extensions"
+
+    #######################################################################
+    # Trivy
+    #######################################################################
+    - name: Add Trivy GPG key
+      ansible.builtin.get_url:
+        url: "{{ trivy_key_url }}"
+        dest: /usr/share/keyrings/trivy.gpg
+        mode: '0644'
+
+    - name: Add Trivy apt repository
+      ansible.builtin.apt_repository:
+        repo: "{{ trivy_apt_repo }}"
+        filename: trivy
+        state: present
+
+    - name: Install Trivy
+      ansible.builtin.apt:
+        name: trivy
+        state: present
+        update_cache: yes
+
+    #######################################################################
+    # AWS CLI v2
+    #######################################################################
+    - name: Download AWS CLI v2 bundle
+      ansible.builtin.get_url:
+        url: https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+        dest: /tmp/awscliv2.zip
+        mode: '0644'
+
+    - name: Unzip AWS CLI v2 bundle
+      ansible.builtin.unarchive:
+        src: /tmp/awscliv2.zip
+        dest: /tmp/
+        remote_src: yes
+
+    - name: Install AWS CLI v2
+      ansible.builtin.command: ./aws/install
+      args:
+        chdir: /tmp
+        creates: /usr/local/bin/aws
+
+    #######################################################################
+    # Optional: add current user to docker group (if ansible_user is not root)
+    #######################################################################
+    - name: Ensure ansible_user is in docker group
+      ansible.builtin.user:
+        name: "{{ ansible_user_id | default(ansible_user, true) }}"
+        groups: docker
+        append: yes
+      when: ansible_user_id is defined

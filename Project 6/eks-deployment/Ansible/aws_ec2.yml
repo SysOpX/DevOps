@@ -1,0 +1,9 @@
+---
+plugin: aws_ec2
+
+regions:
+ - ap-southeast-1
+filters:
+  "tag:Name": "eks-deploy-terraform" # Modify as you wish
+  
+use_contrib_script_compatible_ec2_tag_keys: true
